@@ -33,6 +33,40 @@ export default {
     },
   
     async fetch(request, env, ctx) {
+      // =========================================================================
+      // [新增功能区域 START] - 密码验证与拦截逻辑
+      // =========================================================================
+      
+      // 1. 强制检查环境变量 (env.password)
+      if (!env.password) {
+        return new Response('未配置password环境变量！', {
+          status: 500,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+        });
+      }
+
+      // 预处理请求信息用于鉴权
+      const _authUrl = new URL(request.url);
+      const _clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+      // 2. 处理登录 API 请求 (POST /auth-login)
+      if (_authUrl.pathname === '/auth-login' && request.method === 'POST') {
+        return await handleLoginRequest(request, env, _clientIP);
+      }
+
+      // 3. 验证 Cookie
+      const _cookie = request.headers.get('Cookie') || '';
+      const _isAuthorized = await verifyAuthCookie(_cookie, env.password);
+
+      // 4. 如果未验证通过，拦截所有请求并返回登录页面
+      if (!_isAuthorized) {
+        return await serveAuthPage(env);
+      }
+
+      // =========================================================================
+      // [新增功能区域 END] - 鉴权通过，下方执行原版逻辑
+      // =========================================================================
+
       const url = new URL(request.url);
       const path = url.pathname;
       
@@ -761,7 +795,7 @@ export default {
                   </a>
                   <a href="https://github.com/ethgan/CF-Worker-BestIP-collector" target="_blank" title="GitHub" class="social-link github">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.085 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                          <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-1.333-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.085 8.199-11.386 0-6.627-5.373-12-12-12z"/>
                       </svg>
                   </a>
                   <a href="https://github.com/alienwaregf/CF-Worker-BestIP-collector-UI" target="_blank" title="感谢好软推荐" class="social-link">
@@ -1986,4 +2020,241 @@ export default {
         'Access-Control-Allow-Headers': 'Content-Type'
       }
     });
+  }
+
+  // =========================================================================
+  // [新增辅助函数 START]
+  // =========================================================================
+
+  // 生成简单的哈希 (用于鉴权Cookie)
+  async function sha256(text) {
+    const msgBuffer = new TextEncoder().encode(text);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // 验证Cookie逻辑
+  async function verifyAuthCookie(cookieHeader, correctPassword) {
+    if (!cookieHeader) return false;
+    const cookies = Object.fromEntries(cookieHeader.split('; ').map(c => c.split('=')));
+    const token = cookies['cf_ip_auth'];
+    if (!token) return false;
+    const expectedToken = await sha256(correctPassword);
+    return token === expectedToken;
+  }
+
+  // 处理登录请求
+  async function handleLoginRequest(request, env, clientIP) {
+    if (!env.IP_STORAGE) {
+        return jsonResponse({ success: false, message: '系统错误: IP_STORAGE 未绑定' }, 500);
+    }
+
+    // 1. 检查是否锁定 (Lockout Check)
+    const lockKey = `login_fail:${clientIP}`;
+    const lockData = await env.IP_STORAGE.get(lockKey, { type: 'json' });
+    
+    if (lockData && lockData.count >= 3) {
+        const now = Date.now();
+        if (now < lockData.blockedUntil) {
+            return jsonResponse({ success: false, message: '尝试次数过多，IP已被锁定24小时。' }, 403);
+        } else {
+            // 过期了，清除锁定
+            await env.IP_STORAGE.delete(lockKey);
+        }
+    }
+
+    try {
+        const body = await request.json();
+        const inputPassword = body.password || '';
+
+        // 2. 验证密码
+        if (inputPassword === env.password) {
+            // 登录成功
+            // 清除之前的错误记录
+            await env.IP_STORAGE.delete(lockKey);
+            
+            // 设置Cookie
+            const token = await sha256(env.password);
+            const headers = new Headers();
+            // Cookie 有效期设为7天
+            headers.append('Set-Cookie', `cf_ip_auth=${token}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax; Secure`);
+            
+            return new Response(JSON.stringify({ success: true }), {
+                headers: { 'Content-Type': 'application/json', ...Object.fromEntries(headers) }
+            });
+        } else {
+            // 登录失败
+            const currentCount = (lockData ? lockData.count : 0) + 1;
+            const remaining = 3 - currentCount;
+            
+            // 更新错误记录
+            let storeData = { count: currentCount, blockedUntil: 0 };
+            
+            // 如果达到3次，锁定24小时
+            if (currentCount >= 3) {
+                storeData.blockedUntil = Date.now() + 24 * 60 * 60 * 1000;
+                // KV ttl 设为 24小时稍多一点
+                await env.IP_STORAGE.put(lockKey, JSON.stringify(storeData), { expirationTtl: 86500 });
+                return jsonResponse({ success: false, message: '密码错误，已被锁定24小时！' }, 403);
+            } else {
+                // 未达到锁定，记录次数 (保留24小时记录)
+                await env.IP_STORAGE.put(lockKey, JSON.stringify(storeData), { expirationTtl: 86400 });
+                return jsonResponse({ success: false, message: `密码错误，还剩${remaining}次尝试机会` }, 401);
+            }
+        }
+    } catch (e) {
+        return jsonResponse({ success: false, message: '请求格式错误' }, 400);
+    }
+  }
+
+  // 返回登录页面 HTML
+  async function serveAuthPage(env) {
+    const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloudflare IP 收集器 - 登录</title>
+    <style>
+        :root {
+            --bg-color: #f8fafc;
+            --card-bg: white;
+            --text-color: #334155;
+            --border-color: #e2e8f0;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0f172a;
+                --card-bg: #1e293b;
+                --text-color: #cbd5e1;
+                --border-color: #334155;
+            }
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+        .login-card {
+            background: var(--card-bg);
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+            border: 1px solid var(--border-color);
+        }
+        h1 {
+            color: #3b82f6;
+            margin-bottom: 10px;
+            font-size: 1.8rem;
+        }
+        p {
+            color: #64748b;
+            margin-bottom: 30px;
+            font-size: 0.95rem;
+        }
+        input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 1rem;
+            outline: none;
+            background: var(--bg-color);
+            color: var(--text-color);
+            transition: border-color 0.2s;
+        }
+        input:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+        button:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+        .error-msg {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 20px;
+            font-size: 0.9rem;
+            display: none;
+            border: 1px solid #fecaca;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h1>Cloudflare IP 收集器</h1>
+        <p>请输入管理员密码访问此页面</p>
+        <input type="password" id="password" placeholder="输入管理员密码" onkeypress="if(event.key==='Enter') doLogin()">
+        <button onclick="doLogin()" id="loginBtn">登录</button>
+        <div class="error-msg" id="errorMsg"></div>
+    </div>
+
+    <script>
+        async function doLogin() {
+            const pwd = document.getElementById('password').value;
+            const btn = document.getElementById('loginBtn');
+            const msg = document.getElementById('errorMsg');
+            
+            if(!pwd) return;
+            
+            btn.disabled = true;
+            btn.innerText = '验证中...';
+            msg.style.display = 'none';
+            
+            try {
+                const res = await fetch('/auth-login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: pwd})
+                });
+                const data = await res.json();
+                
+                if(data.success) {
+                    location.reload();
+                } else {
+                    msg.innerText = data.message;
+                    msg.style.display = 'block';
+                    btn.disabled = false;
+                    btn.innerText = '登录';
+                }
+            } catch(e) {
+                msg.innerText = '网络错误，请重试';
+                msg.style.display = 'block';
+                btn.disabled = false;
+                btn.innerText = '登录';
+            }
+        }
+    </script>
+</body>
+</html>`;
+    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
