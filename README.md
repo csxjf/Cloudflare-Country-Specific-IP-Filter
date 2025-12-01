@@ -25,6 +25,7 @@
 - 改变默认edgetunnel输出方式为纯节点，方便结合Sub Store使用
 - 更改时间格式为24时制并新增年月日显示
 - 增加了Token管理
+- 新增CFnew自动更新引用url
 
 ![alt text](image/Light1.png)
 ![alt text](image/Light2.png)
