@@ -134,11 +134,9 @@ async function handleRawRequest(regionStr, format, limit = 0, requestUrl = null)
             const pool = regionPools[region];
             
             if (!pool || pool.length === 0) continue;
-            if (limit > 0) {
-                for (let i = 0; i < limit; i++) {
-                    const randomIndex = Math.floor(Math.random() * pool.length);
-                    selectedItems.push(pool[randomIndex]);
-                }
+            if (limit > 0 && pool.length > limit) {
+                const shuffled = [...pool].sort(() => 0.5 - Math.random());
+                selectedItems.push(...shuffled.slice(0, limit));
             } else {
                 selectedItems.push(...pool);
             }
